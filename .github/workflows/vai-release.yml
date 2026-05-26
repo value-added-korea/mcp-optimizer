@@ -1,0 +1,95 @@
+name: VAI Release
+
+# Triggered by pushing a version tag: git tag v0.3.0-vai.1 && git push origin v0.3.0-vai.1
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  release:
+    name: Build and Push Container
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          python-version: '3.13'
+
+      - name: Install Task
+        uses: arduino/setup-task@b91d5d2c96a56797b48ac1e0e89220bf64044611 # v2.0.0
+        with:
+          version: 3.44.1
+
+      - name: Cache ML models
+        id: cache-models
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: models/
+          key: ml-models-v1-fastembed-bge-small-tiktoken-cl100k-llmlingua2
+
+      - name: Download ML models
+        if: steps.cache-models.outputs.cache-hit != 'true'
+        run: task download-models
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract tag version
+        id: tag
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          # Docker tags do not allow '+' — replace with '_'
+          DOCKER_VERSION="${VERSION//+/_}"
+          echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
+          echo "DOCKER_VERSION=${DOCKER_VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Set repository owner lowercase
+        id: repo_owner
+        run: echo "OWNER=$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
+        with:
+          images: ghcr.io/${{ steps.repo_owner.outputs.OWNER }}/mcp-optimizer
+          tags: |
+            type=raw,value=${{ steps.tag.outputs.DOCKER_VERSION }}
+            type=raw,value=latest
+          labels: |
+            org.opencontainers.image.title=mcp-optimizer
+            org.opencontainers.image.description=VAI fork of MCP Optimizer — Podman host-networking fixes
+            org.opencontainers.image.vendor=Value Added International
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.tag.outputs.VERSION }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
+
+      - name: Build and push container
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true
