@@ -1,6 +1,6 @@
 [project]
 name = "mcp-optimizer"
-version = "0.3.0-vai.1"
+version = "0.3.0.post1"
 description = "ToolHive MCP Optimizer — VAI fork with Podman host-networking fixes"
 readme = "README.md"
 requires-python = ">=3.13"
