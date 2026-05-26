@@ -1,175 +1,183 @@
-# ⚠️ ARCHIVED ⚠️
+# ToolHive MCP Optimizer — VAI Fork
 
-The MCP Optimizer was an experimental project and is no longer maintained as a standalone repo. Its functionality has been folded into ToolHive's vMCP, which is the path forward for both Kubernetes and local use cases.
-
-- **Kubernetes:** [Run the optimizer with vMCP in Kubernetes](https://docs.stacklok.com/toolhive/guides-vmcp/optimizer)
-- **Local (CLI):** [Enable the optimizer in quick mode](https://docs.stacklok.com/toolhive/guides-vmcp/local-cli#enable-the-optimizer-in-quick-mode)
+> **Fork maintained by Gerald Staruiala / [Value Added International](https://www.value-added-international.com)**
+>
+> This is a fork of the original [stackloklabs/mcp-optimizer](https://github.com/stackloklabs/mcp-optimizer)
+> (archived upstream). The upstream project has been folded into ToolHive's vMCP feature.
+> This fork continues standalone development to support Podman-based local deployments
+> where the upstream container image no longer works correctly.
+>
+> All original code is copyright © Stacklok, Inc. and contributors, licensed under the
+> Apache License 2.0. New contributions in this fork are copyright © 2026 Gerald Staruiala /
+> Value Added International, also under the Apache License 2.0.
 
 ---
 
-# ToolHive MCP Optimizer
+## What was changed and why
+
+The upstream `ghcr.io/stackloklabs/mcp-optimizer:0.3.0` image has two bugs that prevent
+it from working in a standard Podman-based ToolHive setup:
+
+### Bug 1 — ToolHive API server not being reached
+
+The container was scanning proxy ports (50000–50100) for `GET /api/v1beta/version`, but
+those ports belong to MCP proxy processes, not the ToolHive API server. The ToolHive API
+server (`thv serve`) must be running separately and the optimizer must be pointed at it
+via `TOOLHIVE_HOST` + `TOOLHIVE_PORT`.
+
+**Fix:** `setup-mcp-optimizer.sh` now starts `thv serve --host 0.0.0.0 --port 8080` before
+launching the container, and passes `TOOLHIVE_HOST=127.0.0.1` and `TOOLHIVE_PORT=8080`
+as explicit environment variables.
+
+### Bug 2 — `host.docker.internal` does not resolve under Podman
+
+The Dockerfile hardcoded `ENV TOOLHIVE_HOST=host.docker.internal`. This hostname is
+Docker-specific. Under Podman the correct hostname is `host.containers.internal`.
+Additionally, the MCP proxy ports are bound to `127.0.0.1` (loopback), so they are only
+reachable from inside the container when using `--network host`.
+
+**Fix:**
+- `Dockerfile`: changed default `TOOLHIVE_HOST` to `host.containers.internal`
+- `toolhive_client.py`: added a fallback host list in `_discover_port_async` — tries
+  the configured host first, then `host.containers.internal`, then `host.docker.internal`
+- Container is run with `--network host` so it shares the host network namespace and
+  can reach all loopback-bound proxy ports directly
+
+---
+
+## Original project description
 
 An intelligent intermediary MCP server that provides semantic tool discovery,
 caching, and unified access to multiple MCP servers through a single endpoint.
 
-## Features
+### Features
 
-- **Semantic Tool Discovery**: Intelligently discover and route requests to
-  appropriate MCP tools
+- **Semantic Tool Discovery**: Intelligently discover and route requests to appropriate MCP tools
 - **Unified Access**: Single endpoint to access multiple MCP servers
 - **Tool Management**: Manage large numbers of MCP tools seamlessly
-- **Group Filtering**: Filter tool discovery by ToolHive groups for
-  multi-environment support
+- **Group Filtering**: Filter tool discovery by ToolHive groups for multi-environment support
 
-## Requirements for Development
+---
+
+## Requirements
 
 - Python 3.13+
 - uv package manager
+- ToolHive CLI (`thv`) v0.12.2+
+- Podman (Docker also supported)
 
-## Usage
+---
 
-MCP Optimizer is meant to be run with ToolHive. It will automatically discover
-the MCP workloads running in ToolHive and their tools.
+## Quickstart (Podman + local build)
 
-### Prerequisites
-
-- [ToolHive UI](https://docs.stacklok.com/toolhive/tutorials/quickstart-ui#step-1-install-the-toolhive-ui)
-  (version >= 0.6.0)
-- [ToolHive CLI](https://docs.stacklok.com/toolhive/tutorials/quickstart-cli#step-1-install-toolhive)
-  (version >= 0.3.1)
-
-### Setup
-
-ToolHive UI must be running for the setup.
-
-#### 1. Run MCP Optimizer in a dedicated group in ToolHive
-
-We need to run MCP Optimizer in a dedicated group to configure AI clients
-(Cursor, Claude Desktop, etc.) for this group only. This ensures that clients
-are configured with only the MCP Optimizer server, while other MCP servers
-remain installed but not configured in the AI clients.
+### 1. Download models and build the local image
 
 ```bash
-# 1. Create the group
+# From the repo root
+uv sync --group offline-models
+uv run --group offline-models python scripts/download_models.py
+podman build -t localhost/vai-mcp-optimizer:local .
+```
+
+### 2. Start ToolHive API server
+
+The optimizer needs the ToolHive REST API to be reachable. Start it bound to all
+interfaces so the container can connect via the host network:
+
+```bash
+thv serve --host 0.0.0.0 --port 8080
+```
+
+### 3. Run the optimizer
+
+```bash
 thv group create optim
-# 2. Run MCP Optimizer in the dedicated group
-thv run --group optim mcp-optimizer
+
+thv run \
+  --name vai-mcp-optimizer \
+  --group optim \
+  --proxy-port 50000 \
+  --network host \
+  --env ALLOWED_GROUPS=code \
+  --env TOOLHIVE_HOST=127.0.0.1 \
+  --env TOOLHIVE_PORT=8080 \
+  localhost/vai-mcp-optimizer:local
 ```
 
-#### 2. Configure MCP Optimizer with your favorite AI client
+Or use the provided script which handles all steps:
 
 ```bash
-# thv client register <client_name> --group optim. Example:
+./setup-mcp-optimizer.sh
+```
+
+### 4. Configure your AI client
+
+```bash
 thv client register cursor --group optim
-# Check the configuration
-thv client list-registered
+# or
+thv client register claude --group optim
 ```
 
-#### 3. Add MCP servers to the default group in ToolHive
-
-```bash
-# thv run <mcp_server>. Example
-thv run time
-# Check the config. mcp-optimizer should be in group `optim` and the rest in `default`
-thv ls
-```
-
-### Run
-
-Now you should be able to use MCP Optimizer in the chat of the configured
-client. Examples:
-
-- With the Github MCP server installed, get a GitHub issue details
-
-```markdown
-Get the details of GitHub issue 1911 from stacklok/toolhive repo
-```
+---
 
 ## Configuration
 
-### Runtime Mode
+### Key environment variables
 
-MCP Optimizer supports two runtime modes for deploying and managing MCP servers:
+| Variable | Default | Description |
+|---|---|---|
+| `TOOLHIVE_HOST` | `host.containers.internal` | Host where `thv serve` is reachable |
+| `TOOLHIVE_PORT` | *(scan 50000–50100)* | Port for ToolHive API server |
+| `ALLOWED_GROUPS` | *(all groups)* | Comma-separated ToolHive group names to discover tools from |
+| `RUNTIME_MODE` | `docker` | `docker` or `k8s` |
+| `TOOLHIVE_MAX_RETRIES` | `100` | Max connection retry attempts |
+| `TOOLHIVE_INITIAL_BACKOFF` | `1.0` | Initial retry delay in seconds |
+| `TOOLHIVE_MAX_BACKOFF` | `60.0` | Maximum retry delay in seconds |
 
-- **docker** (default): Run MCP servers as Docker containers
-- **k8s**: Run MCP servers as Kubernetes workloads
+### Runtime modes
 
-Configuration is case-insensitive (e.g., `K8S`, `Docker`, `k8s` are all valid).
+- **docker** (default): MCP servers run as containers via Docker/Podman
+- **k8s**: MCP servers run as Kubernetes workloads
 
-**Quick Start:**
+### Connection resilience
 
-```bash
-# Run in Kubernetes mode via environment variable
-export RUNTIME_MODE=k8s
-mcpo
+If `thv serve` restarts, the optimizer will automatically rescan for ToolHive and
+retry with exponential backoff (1s → 2s → 4s → … up to 60s), up to 100 attempts.
 
-# Run in Kubernetes mode via command line option
-mcpo --runtime-mode k8s
+---
 
-# Run in Docker mode (default)
-mcpo --runtime-mode docker
-```
-
-For detailed documentation on runtime modes, including code examples, see
-[docs/runtime-modes.md](docs/runtime-modes.md).
-
-### Group Filtering
-
-MCP Optimizer supports filtering tool discovery by ToolHive groups. This is
-useful when running multiple MCP servers across different environments
-(production, staging, development, etc.) and you want to limit tool discovery to
-specific groups.
-
-**Quick Start:**
+## Development
 
 ```bash
-# Only discover tools from production and staging groups
-export ALLOWED_GROUPS="production,staging"
-mcp-optimizer
+# Install dependencies
+uv sync
+
+# Format
+task format
+
+# Lint
+task lint
+
+# Type check
+task typecheck
+
+# Test
+task test
 ```
 
-For detailed documentation on group filtering, including usage examples, see
-[docs/group-filtering.md](docs/group-filtering.md).
+---
 
-### Connection Resilience
+## License
 
-MCP Optimizer automatically handles ToolHive connection failures with
-intelligent retry logic. If ToolHive (`thv serve`) restarts on a different port,
-MCP Optimizer will:
+Original code: Apache License 2.0 — Copyright © Stacklok, Inc. and contributors.
+Fork modifications: Apache License 2.0 — Copyright © 2026 Gerald Staruiala / Value Added International.
 
-1. **Detect the connection failure** across all ToolHive API operations
-2. **Automatically rescan** for ToolHive on the new port
-3. **Retry with exponential backoff** (1s → 2s → 4s → ... up to 60s)
-4. **Gracefully exit** after exhausting all retries (default: 100 attempts over
-   ~100 minutes)
+See [LICENSE](LICENSE) for the full license text.
 
-**Configuration:**
+---
 
-```bash
-# Customize retry behavior via environment variables
-export TOOLHIVE_MAX_RETRIES=150             # Max retry attempts (default: 100)
-export TOOLHIVE_INITIAL_BACKOFF=2.0         # Initial delay in seconds (default: 1.0)
-export TOOLHIVE_MAX_BACKOFF=120.0           # Maximum delay in seconds (default: 60.0)
+## Upstream references
 
-# Or via CLI options
-mcp-optimizer --toolhive-max-retries 15 --toolhive-initial-backoff 2.0
-```
-
-This ensures MCP Optimizer remains operational even when ToolHive restarts,
-minimizing service interruptions. For detailed information on configuration
-options, testing scenarios, and troubleshooting, see
-[docs/connection-resilience.md](docs/connection-resilience.md).
-
-### Environment Variables
-
-- `RUNTIME_MODE`: Runtime mode for MCP servers (`docker` or `k8s`, default:
-  `docker`)
-- `ALLOWED_GROUPS`: Comma-separated list of ToolHive group names to filter tool
-  lookups (default: no filtering)
-- `TOOLHIVE_MAX_RETRIES`: Maximum retry attempts on connection failure (default:
-  `100`, range: 1-500)
-- `TOOLHIVE_INITIAL_BACKOFF`: Initial retry backoff delay in seconds (default:
-  `1.0`, range: 0.1-10.0)
-- `TOOLHIVE_MAX_BACKOFF`: Maximum retry backoff delay in seconds (default:
-  `60.0`, range: 1.0-300.0)
-- Additional configuration options can be found in `src/mcp_optimizer/config.py`
+- Original repo (archived): https://github.com/stackloklabs/mcp-optimizer
+- ToolHive docs: https://docs.stacklok.com/toolhive
+- ToolHive vMCP (upstream path forward): https://docs.stacklok.com/toolhive/guides-vmcp/optimizer

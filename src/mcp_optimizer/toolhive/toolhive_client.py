@@ -140,28 +140,66 @@ class ToolhiveClient:
         # Set attempt timestamp
         self._last_discovery_attempt_time = time.time()
 
+        # Build the list of hosts to try in order. The configured host is always
+        # tried first; we then fall back to the standard Podman and Docker aliases
+        # so the container works regardless of runtime without requiring an explicit
+        # TOOLHIVE_HOST override.
+        _FALLBACK_HOSTS = ["host.containers.internal", "host.docker.internal"]
+        hosts_to_try: list[str] = [self.thv_host]
+        for _h in _FALLBACK_HOSTS:
+            if _h not in hosts_to_try:
+                hosts_to_try.append(_h)
+
         try:
-            if port is not None:
-                for attempt in range(3):
-                    try:
-                        _, port = await self._is_toolhive_available(self.thv_host, port)
-                        self.thv_port = port
+            discovered_host: str | None = None
+            for candidate_host in hosts_to_try:
+                if port is not None:
+                    for attempt in range(3):
+                        try:
+                            _, port = await self._is_toolhive_available(candidate_host, port)
+                            self.thv_port = port
+                            discovered_host = candidate_host
+                            break
+                        except ToolhiveScanError:
+                            logger.warning(
+                                "ToolHive not available at specified host/port, retrying...",
+                                host=candidate_host,
+                                port=port,
+                                attempt=attempt + 1,
+                            )
+                            await asyncio.sleep(1)
+                    if self.thv_port is not None:
                         break
-                    except ToolhiveScanError:
-                        logger.warning(
-                            "ToolHive not available at specified host/port, retrying...",
-                            host=self.thv_host,
-                            port=port,
-                            attempt=attempt + 1,
+
+                if self.thv_port is None:
+                    try:
+                        self.thv_port = await self._scan_for_toolhive(
+                            candidate_host, self.scan_port_start, self.scan_port_end
                         )
-                        await asyncio.sleep(1)
-            # If port is not found yet (either not specified or retries failed),
-            # try scanning the port range
-            if self.thv_port is None:
-                # Scan for ToolHive in the port range
-                self.thv_port = await self._scan_for_toolhive(
-                    self.thv_host, self.scan_port_start, self.scan_port_end
+                        discovered_host = candidate_host
+                        break
+                    except (ConnectionError, ToolhiveScanError):
+                        logger.warning(
+                            "ToolHive not found on candidate host, trying next",
+                            host=candidate_host,
+                            port_range=f"{self.scan_port_start}-{self.scan_port_end}",
+                        )
+
+            if self.thv_port is None or discovered_host is None:
+                raise ConnectionError(
+                    f"ToolHive not found on any host {hosts_to_try} "
+                    f"in port range {self.scan_port_start}-{self.scan_port_end}"
                 )
+
+            # Update thv_host to whichever candidate responded so that subsequent
+            # URL replacements in list_workloads use the correct reachable host.
+            if discovered_host != self.thv_host:
+                logger.info(
+                    "ToolHive discovered on fallback host",
+                    configured_host=self.thv_host,
+                    discovered_host=discovered_host,
+                )
+                self.thv_host = discovered_host
 
             # Success: set base_url and update state
             self.base_url = f"http://{self.thv_host}:{self.thv_port}"

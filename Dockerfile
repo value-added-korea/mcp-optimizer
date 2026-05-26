@@ -81,7 +81,9 @@ COPY --chown=app:app models/llmlingua /app/.cache/llmlingua
 USER app
 
 # Set default environment variables for container deployment
-ENV TOOLHIVE_HOST=host.docker.internal
+# host.containers.internal is the standard Podman hostname for reaching the host;
+# host.docker.internal is the Docker equivalent. Override via TOOLHIVE_HOST env var.
+ENV TOOLHIVE_HOST=host.containers.internal
 ENV RUNNING_IN_DOCKER=1
 ENV FASTEMBED_CACHE_PATH=/app/.cache/fastembed
 ENV TIKTOKEN_CACHE_DIR=/app/.cache/tiktoken
